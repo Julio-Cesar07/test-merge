@@ -1,0 +1,87 @@
+name: sync dev after main merge
+
+# Mantém a `dev` alinhada com a `main` depois de QUALQUER mudança na `main`: PR
+# `dev → main`, PR de hotfix ou push direto. Estratégia de merge do time:
+# feature → `dev` só squash, `dev` → `main` só rebase (regras nos rulesets do repo).
+#
+# Cenários:
+#  * a `dev` está contida na `main` → fast-forward da `dev`.
+#  * PR `dev → main` com "Rebase and merge": o GitHub recria os commits com SHA novo
+#    e a `dev` fica com o MESMO conteúdo da `main`, mas com SHAs diferentes → a `dev`
+#    é realinhada à `main` (só descarta os commits duplicados).
+#  * a `dev` tem commits que a `main` não tem (feature ainda não promovida ou hotfix
+#    que entrou só na `main`) → `git rebase` da `dev` sobre a `main`. O rebase descarta
+#    sozinho os commits cujo conteúdo já está na `main`. Se der conflito, o job falha
+#    e a sincronização é manual.
+#
+# O push usa o token do GitHub App `rd-branch-sync`, que está no bypass do ruleset
+# da `dev` — o GITHUB_TOKEN não consegue furar ruleset. Por ser token de App, o push
+# na `dev` dispara o deploy de dev normalmente.
+#
+# Fonte única: infra/scripts/github/sync-dev-after-main-merge.yml. Mudou aqui, copie
+# para os outros repos.
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: sync-dev-after-main-merge
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync-dev:
+    name: align dev with main
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.BRANCH_SYNC_APP_ID }}
+          private-key: ${{ secrets.BRANCH_SYNC_APP_PRIVATE_KEY }}
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Align dev with main
+        run: |
+          git config user.name "rd-branch-sync[bot]"
+          git config user.email "rd-branch-sync[bot]@users.noreply.github.com"
+          git fetch origin dev main
+
+          main_sha=$(git rev-parse origin/main)
+          dev_sha=$(git rev-parse origin/dev)
+
+          if [ "$main_sha" = "$dev_sha" ]; then
+            echo "dev já está em $(git rev-parse --short "$main_sha")"
+          elif git merge-base --is-ancestor origin/dev origin/main; then
+            git push origin "$main_sha:refs/heads/dev"
+            echo "dev avançada (fast-forward) até $(git rev-parse --short "$main_sha")"
+          elif git diff --quiet origin/main origin/dev; then
+            git push --force-with-lease="refs/heads/dev:$dev_sha" origin "$main_sha:refs/heads/dev"
+            echo "dev tinha commits duplicados (rebase merge) com o mesmo conteúdo; realinhada em $(git rev-parse --short "$main_sha")"
+          else
+            echo "dev tem commits fora da main:"
+            git log --oneline origin/main..origin/dev
+            git checkout -B dev origin/dev
+            if git rebase origin/main; then
+              git push --force-with-lease="refs/heads/dev:$dev_sha" origin HEAD:refs/heads/dev
+              echo "dev rebaseada sobre a main; commits que seguem só na dev:"
+              git log --oneline origin/main..HEAD
+            else
+              git rebase --abort
+              echo "::error::rebase da dev sobre a main deu conflito — sincronize manualmente (git rebase origin/main na dev e push --force-with-lease)."
+              exit 1
+            fi
+          fi
