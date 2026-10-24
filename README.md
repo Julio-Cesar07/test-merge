@@ -51,7 +51,7 @@ e o job em **Actions → "sync dev after main merge"**.
 
 **1. Squash na dev.** Branch `feat/a` com 3 commits em `app.txt`, PR para `dev`.
 - Esperado: o botão só oferece **Squash and merge**; a `dev` ganha 1 commit com o título do PR;
-  a branch `feat/a` é apagada.
+  a branch `feat/a` continua existindo (nada é apagado automaticamente).
 
 **2. Rebase da dev na main.** Repita o 1 com `feat/b`. PR `dev → main`.
 - Esperado: só **Rebase and merge**; a `main` ganha 2 commits (um por feature); o sync roda e

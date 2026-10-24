@@ -302,6 +302,9 @@ def cmd_pr(args: argparse.Namespace) -> None:
     pr_branch = f"migration/{slugify(Path(order[0].path).stem.split('_', 1)[-1])}"
 
     # branch do PR = origin/dev + só as migrations (worktree temporário)
+    # Se a branch do PR já existe no remoto (rodada anterior, ou "Update branch" no GitHub),
+    # atualiza a referência local: o push abaixo recria a branch e precisa do lease em dia.
+    git("fetch", REMOTE, f"+refs/heads/{pr_branch}:refs/remotes/{REMOTE}/{pr_branch}", check=False)
     tmp = Path(tempfile.mkdtemp(prefix="migration-pr-"))
     try:
         git("worktree", "add", "-B", pr_branch, str(tmp), dev_ref)

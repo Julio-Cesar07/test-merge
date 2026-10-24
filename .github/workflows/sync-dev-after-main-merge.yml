@@ -58,7 +58,15 @@ jobs:
         run: |
           git config user.name "rd-branch-sync[bot]"
           git config user.email "rd-branch-sync[bot]@users.noreply.github.com"
-          git fetch origin dev main
+          git fetch origin main
+          # A `dev` pode ter sido apagada no merge do PR dev → main (opção "Automatically
+          # delete head branches" ligada por engano). Nesse caso ela era igual à main.
+          if ! git ls-remote --exit-code --heads origin dev >/dev/null; then
+            git push origin "$(git rev-parse origin/main):refs/heads/dev"
+            echo "::warning::a dev não existia (apagada no merge?) — recriada a partir da main. Confira se 'Automatically delete head branches' está desligado."
+            exit 0
+          fi
+          git fetch origin dev
 
           main_sha=$(git rev-parse origin/main)
           dev_sha=$(git rev-parse origin/dev)

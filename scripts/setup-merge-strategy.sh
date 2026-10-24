@@ -6,7 +6,7 @@
 #
 # O que faz, por repo:
 #   1. Settings → General: desliga merge commit, liga squash e rebase, squash usa o
-#      título do PR, apaga a branch depois do merge.
+#      título do PR; desliga a exclusão automática da branch (apagaria a `dev`).
 #   2. Rulesets `dev` e `main`: PR obrigatório com o método de merge permitido,
 #      histórico linear, sem force push, sem apagar a branch. Os status checks exigidos
 #      pela branch protection clássica (se houver) são copiados para o ruleset.
@@ -234,7 +234,9 @@ configure_merge_settings() {
     allow_merge_commit: false,
     allow_squash_merge: true,
     allow_rebase_merge: true,
-    delete_branch_on_merge: true,
+    # false: a opção nativa apagaria a própria `dev` no PR dev → main (quem mergeia está
+    # no bypass do ruleset, que libera a exclusão). Branches de feature não são apagadas.
+    delete_branch_on_merge: false,
     squash_merge_commit_title: $t,
     squash_merge_commit_message: $m
   }')
