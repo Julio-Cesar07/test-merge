@@ -42,13 +42,16 @@ REPOS=(
 APP_ID_VAR="BRANCH_SYNC_APP_ID"
 APP_KEY_SECRET="BRANCH_SYNC_APP_PRIVATE_KEY"
 
-# Quem pode furar os rulesets (push direto, merge com qualquer método) em `dev` e `main`.
+# Quem pode furar os rulesets (push direto, force push, merge com qualquer método) em
+# `dev` e `main`. Padrão: todo mundo com escrita. No PR, furar exige marcar a caixa
+# "bypass rules" de propósito; no `git push` passa direto (só aparece um aviso) — quem dá
+# --force assume o risco. O merge commit continua impossível para todos (Settings → General).
 # O App de sync entra sempre no bypass da `dev`, independente disso.
-# Dá para sobrescrever por variável de ambiente (ex.: BYPASS_REPO_ADMINS=false para testar
-# as regras sendo admin do repo).
+# Dá para sobrescrever por variável de ambiente (ex.: BYPASS_REPO_ROLES="" para testar as
+# regras sendo admin do repo).
 BYPASS_ORG_ADMINS=${BYPASS_ORG_ADMINS:-true}
-BYPASS_REPO_ADMINS=${BYPASS_REPO_ADMINS:-true}
-BYPASS_TEAMS=() # slugs de times da org, ex.: (tech-leads backend)
+BYPASS_REPO_ROLES=${BYPASS_REPO_ROLES-admin maintain write} # roles do repo: admin maintain write
+BYPASS_TEAMS=() # slugs de times da org, ex.: (tech-leads); também via --bypass-team
 
 # Mensagem do commit no squash: título do PR + descrição do PR.
 SQUASH_TITLE="PR_TITLE"
@@ -70,11 +73,14 @@ FAILED=()
 
 usage() {
   cat <<EOF
-Uso: $(basename "$0") [--apply] [--repo NOME]... [--app-id ID --app-key-file ARQUIVO.pem]
+Uso: $(basename "$0") [--apply] [--owner DONO] [--repo NOME]... [--bypass-team SLUG]...
+       [--app-id ID --app-key-file ARQUIVO.pem]
 
   --apply             aplica as mudanças (sem isso, só mostra o que faria)
   --owner DONO        org ou usuário dono dos repos (padrão: $OWNER)
   --repo NOME         em vez da lista REPOS, só este repo (pode repetir)
+  --bypass-team SLUG  time da org a mais no bypass dos rulesets (normalmente não precisa:
+                      quem tem escrita já está); pode repetir
   --app-id ID         App ID do rd-branch-sync (padrão: lê a variable $APP_ID_VAR)
   --app-key-file ARQ  private key (.pem) do App; grava variable + secret
 EOF
@@ -88,6 +94,7 @@ while [[ $# -gt 0 ]]; do
   case $1 in
     --apply) APPLY=true ;;
     --owner) OWNER="${2:?--owner precisa de um nome}"; shift ;;
+    --bypass-team) BYPASS_TEAMS+=("${2:?--bypass-team precisa de um slug}"); shift ;;
     --repo) ONLY_REPOS+=("${2:?--repo precisa de um nome}"); shift ;;
     --app-id) APP_ID="${2:?--app-id precisa de um valor}"; shift ;;
     --app-key-file) APP_KEY_FILE="${2:?--app-key-file precisa de um caminho}"; shift ;;
@@ -184,15 +191,21 @@ setup_app_credentials() {
 # ---------------------------------------------------------------------------
 
 build_bypass() {
-  local include_app=$1 actors='[]' slug team_id
+  local include_app=$1 actors='[]' slug team_id role role_id
   # Conta pessoal não tem admin de org nem times.
   if $IS_ORG && $BYPASS_ORG_ADMINS; then
     actors=$(jq '. + [{actor_id: 1, actor_type: "OrganizationAdmin", bypass_mode: "always"}]' <<<"$actors")
   fi
-  if $BYPASS_REPO_ADMINS; then
-    # RepositoryRole: 5 = admin (2 = maintain, 4 = write).
-    actors=$(jq '. + [{actor_id: 5, actor_type: "RepositoryRole", bypass_mode: "always"}]' <<<"$actors")
-  fi
+  for role in $BYPASS_REPO_ROLES; do
+    # IDs fixos das roles de repositório no GitHub.
+    case $role in
+      admin) role_id=5 ;;
+      maintain) role_id=2 ;;
+      write) role_id=4 ;;
+      *) die "role desconhecida em BYPASS_REPO_ROLES: $role (use admin, maintain, write)" ;;
+    esac
+    actors=$(jq --argjson id "$role_id" '. + [{actor_id: $id, actor_type: "RepositoryRole", bypass_mode: "always"}]' <<<"$actors")
+  done
   $IS_ORG || [[ ${#BYPASS_TEAMS[@]} -eq 0 ]] || die "BYPASS_TEAMS só vale para org"
   for slug in "${BYPASS_TEAMS[@]+"${BYPASS_TEAMS[@]}"}"; do
     team_id=$(gh api "orgs/$OWNER/teams/$slug" --jq .id 2>/dev/null) || die "time não encontrado na org: $slug"
