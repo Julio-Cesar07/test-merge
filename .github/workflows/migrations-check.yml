@@ -38,6 +38,11 @@ jobs:
 
       - run: pip install -r requirements.txt
 
+      # Pega revisão duplicada (dois "0002"): o alembic só avisa e a contagem de cabeças
+      # sozinha não explica o motivo.
+      - name: Corrente única, sem revisão duplicada
+        run: python scripts/migrations.py check
+
       - name: Uma cabeça só
         run: |
           heads=$(alembic heads | grep -c .)
