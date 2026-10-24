@@ -1,0 +1,54 @@
+name: migrations check
+
+# Em todo PR: as migrations formam uma corrente única (uma cabeça só) e sobem do zero
+# num Postgres limpo. O CI roda sobre o código já combinado com a branch de destino,
+# então pega quando outro PR mergeou uma migration com o mesmo pai antes do seu:
+# rode `make migration-pr` de novo para reencadear.
+
+on:
+  pull_request:
+    branches: [dev, main]
+
+jobs:
+  migrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test_merge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://test:test@localhost:5432/test_merge
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Uma cabeça só
+        run: |
+          heads=$(alembic heads | grep -c .)
+          alembic heads
+          if [ "$heads" -ne 1 ]; then
+            echo "::error::$heads cabeças de migration. Outro PR já usou o mesmo pai: rode 'make migration-pr' de novo para reencadear."
+            exit 1
+          fi
+
+      - name: Sobe do zero
+        run: alembic upgrade head
+
+      - name: Desce e sobe de novo (downgrade escrito)
+        run: alembic downgrade base && alembic upgrade head

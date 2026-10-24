@@ -1,0 +1,10 @@
+# chaves (nunca commitar)
+*.pem
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+.env

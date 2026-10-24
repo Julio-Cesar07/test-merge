@@ -28,10 +28,11 @@ Requer `gh` logado (`gh auth login`) e `jq`.
    - Only on this account → **Create**
    - anotar o **App ID**, **Generate a private key** (.pem)
    - **Install App** → Only select repositories → `test-merge`
-3. **Script**: com `BYPASS_REPO_ADMINS=false`, porque você é admin do repo e, no bypass,
-   furaria todas as regras e o teste não provaria nada. Só o App fica no bypass.
+3. **Script**: o padrão põe no bypass todo mundo com escrita (admin/maintain/write). Para os
+   cenários 1, 2 e 5 testarem a regra "dura", rode com `BYPASS_REPO_ROLES=""` (só o App no
+   bypass); para os cenários 4 e 7, rode sem a variável (configuração real da org).
    ```bash
-   export BYPASS_REPO_ADMINS=false
+   export BYPASS_REPO_ROLES=""
    ./scripts/setup-merge-strategy.sh --owner Julio-Cesar07 --repo test-merge \
      --app-id <APP_ID> --app-key-file ~/Downloads/<arquivo>.pem          # dry-run
    ./scripts/setup-merge-strategy.sh --owner Julio-Cesar07 --repo test-merge \
@@ -70,12 +71,82 @@ um `hotfix/y` mudando a mesma linha.
   git push --force-with-lease origin dev
   ```
 
-  O `push --force-with-lease` na `dev` vai ser **rejeitado** (você não está no bypass). Para
-  destravar no teste: rode o script de novo sem `BYPASS_REPO_ADMINS=false` (`--apply`), faça o
-  push e volte a configuração. Na org isso é exatamente o caso em que um admin resolve.
+  Com `BYPASS_REPO_ROLES=""` o push é **rejeitado** (ninguém além do App no bypass). Rode o
+  script de novo sem a variável (`unset BYPASS_REPO_ROLES`, `--apply`) e repita o push: passa,
+  com um aviso de bypass no terminal. É o comportamento da org.
 
 **5. Push direto bloqueado.** `git commit` local e `git push origin dev` (e `main`).
 - Esperado: rejeitado (PR obrigatório / sem force push). Na UI, não aparece "Create a merge commit".
 
 **6. Idempotência do script.** Rode o script de novo (dry-run): deve dizer "merge settings: ok" e
 "atualizaria ruleset", sem criar duplicados.
+
+**7. Bypass pela caixa (configuração real).** Com o script rodado sem `BYPASS_REPO_ROLES`, abra
+um PR de feature para a `dev`.
+- Esperado: o botão oferece só **Squash and merge**; aparece a caixa *"bypass rules"*. Marcando,
+  surge também **Rebase and merge**, mas nunca **Create a merge commit**. O bypass aparece em
+  Settings → Rules → Insights.
+
+---
+
+# Migrations em equipe (alembic)
+
+Projeto mínimo: `app/models.py` (tabela `products`), `alembic/` com revisões sequenciais
+(`0001_...`), Postgres local no `docker-compose.yml` (porta **5433**), comandos no `Makefile`
+e a lógica em `scripts/migrations.py`. O CI (`migrations-check.yml`) roda em todo PR:
+uma cabeça só, sobe do zero, desce e sobe de novo.
+
+## Preparação
+
+```bash
+make install && source .venv/bin/activate
+make db-up          # Postgres local; ele faz o papel do "banco de dev"
+make migrate        # aplica a 0001
+```
+
+O banco vem de `DATABASE_URL` (padrão: o Postgres local do compose).
+
+## Comandos
+
+| Comando | O que faz |
+|---|---|
+| `make migration m="add price"` | gera a próxima revisão a partir da cabeça da `origin/dev` (autogenerate; `EMPTY=1` para vazia) |
+| `make migration-pr` | PR só com as migrations novas da sua branch para a `dev`; renumera/reencadeia se a `dev` andou |
+| `make release` | lista o que está na `dev` e não na `main`, com o nº do PR |
+| `make release PRS="14 15"` | release parcial para a `main`; a migration da feature é reencadeada na cabeça da `main` |
+| `make migration-rechain` | na `dev` local, depois do rebase: reencadeia o que ficou só na `dev` |
+| `make db-dev-realign` | stamp + upgrade no banco, **antes** do push da `dev` (`OLD_REF=sha` se precisar) |
+| `make migration-check` | corrente única, sem banco (o sync usa) |
+
+## Roteiro de teste
+
+**M1. Migration simples.** Branch `feat/price` a partir da `dev`; em `app/models.py` adicione
+`price: Mapped[int | None] = mapped_column(Integer, nullable=True)`; `make migration m="add price"`;
+revise, commite; `make migration-pr`.
+- Esperado: branch `migration/add_price` com só o arquivo, PR aberto para a `dev`. Squash → o
+  deploy (aqui: você roda `make migrate` com a `dev` atualizada) aplica.
+
+**M2. Duas pessoas, mesma 0002.** Crie `feat/stock` a partir da `dev` **antes** de mergear o M1,
+`make migration m="add stock" EMPTY=1` (vira 0002), escreva o `op.add_column`/`op.drop_column`,
+commite. Mergeie o PR do M1. Depois rode `make migration-pr` na `feat/stock`.
+- Esperado: `0002 → 0003 (pai: 0002)`; o arquivo é renomeado também na sua branch.
+- Variante: abra o PR da `feat/stock` **antes** de mergear o M1 e mergeie o M1 depois → o
+  `migrations check` do PR fica vermelho ("2 cabeças"); `make migration-pr` de novo resolve.
+
+**M3. Migration destrutiva.** Uma migration com `op.drop_column` no `upgrade()` →
+`make migration-pr` avisa e pergunta (`FORCE=1` pula).
+
+**M4. Release parcial.** Com 3 features na `dev` (cada uma com PR de migration + PR de código),
+`make release` para ver a lista e `make release PRS="<migration da C> <feature C>"`.
+Mergeie o PR na `main` com **Rebase and merge**.
+- Esperado: na `main`, a migration da C aponta para a cabeça antiga da `main`.
+- O sync **falha sem dar push** ("mais de uma cabeça"); a `dev` fica como estava.
+- Ajuste (o `make release` imprime os passos):
+  ```bash
+  git fetch origin && git checkout dev && git reset --hard origin/dev
+  git rebase origin/main
+  make migration-rechain     # ex.: 0001 → 0004 → 0002 → 0003
+  make db-dev-realign        # banco em 0004 → stamp 0003, nada a aplicar
+  git push --force-with-lease origin dev
+  ```
+- Esperado: `alembic current` = cabeça nova; `make migrate` não aplica nada.

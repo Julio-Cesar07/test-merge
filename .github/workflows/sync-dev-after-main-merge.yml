@@ -76,6 +76,13 @@ jobs:
             git log --oneline origin/main..origin/dev
             git checkout -B dev origin/dev
             if git rebase origin/main; then
+              # Release parcial: a migration levada para a main foi reencadeada e as que ficaram
+              # na dev ainda apontam para a corrente antiga → duas cabeças. Não envia: a dev
+              # precisa de `make migration-rechain` e o banco de dev de `make db-dev-realign`.
+              if [ -f scripts/migrations.py ] && ! python3 scripts/migrations.py check; then
+                echo "::error::depois do rebase as migrations da dev ficaram com mais de uma cabeça (release parcial). A dev NÃO foi atualizada. Ajuste manual: git checkout dev && git reset --hard origin/dev && git rebase origin/main && make migration-rechain && make db-dev-realign && git push --force-with-lease origin dev"
+                exit 1
+              fi
               git push --force-with-lease="refs/heads/dev:$dev_sha" origin HEAD:refs/heads/dev
               echo "dev rebaseada sobre a main; commits que seguem só na dev:"
               git log --oneline origin/main..HEAD
