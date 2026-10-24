@@ -6,7 +6,7 @@
 #
 # O que faz, por repo:
 #   1. Settings → General: desliga merge commit, liga squash e rebase, squash usa o
-#      título do PR, apaga a branch depois do merge.
+#      título do PR; desliga a exclusão automática da branch (apagaria a `dev`).
 #   2. Rulesets `dev` e `main`: PR obrigatório com o método de merge permitido,
 #      histórico linear, sem force push, sem apagar a branch. Os status checks exigidos
 #      pela branch protection clássica (se houver) são copiados para o ruleset.
@@ -61,6 +61,13 @@ RULESET_DEV_NAME="merge-strategy: dev (squash)"
 RULESET_MAIN_NAME="merge-strategy: main (rebase)"
 
 SYNC_WORKFLOW_PATH=".github/workflows/sync-dev-after-main-merge.yml"
+
+# Check de migrations (corrente única, sobe do zero). Quando o workflow existe na `dev` do
+# repo, vira obrigatório no ruleset da `dev` com "branch atualizada antes do merge": se a
+# `dev` andou (ex.: outro PR mergeou uma migration), o PR precisa de "Update branch", o que
+# roda o check de novo sobre a `dev` nova. Sem o workflow, não exige (travaria todo PR).
+MIGRATIONS_WORKFLOW_PATH=".github/workflows/migrations-check.yml"
+MIGRATIONS_CHECK_CONTEXT="migrations" # nome do job no workflow
 
 # ---------------------------------------------------------------------------
 
@@ -234,7 +241,9 @@ configure_merge_settings() {
     allow_merge_commit: false,
     allow_squash_merge: true,
     allow_rebase_merge: true,
-    delete_branch_on_merge: true,
+    # false: a opção nativa apagaria a própria `dev` no PR dev → main (quem mergeia está
+    # no bypass do ruleset, que libera a exclusão). Branches de feature não são apagadas.
+    delete_branch_on_merge: false,
     squash_merge_commit_title: $t,
     squash_merge_commit_message: $m
   }')
@@ -288,9 +297,9 @@ read_classic_protection() {
 }
 
 ruleset_json() {
-  local name=$1 branch=$2 method=$3 bypass=$4 checks=$5
+  local name=$1 branch=$2 method=$3 bypass=$4 checks=$5 strict=${6:-false}
   jq -n --arg name "$name" --arg ref "refs/heads/$branch" --arg method "$method" \
-    --argjson bypass "$bypass" --argjson checks "$checks" '{
+    --argjson bypass "$bypass" --argjson checks "$checks" --argjson strict "$strict" '{
     name: $name,
     target: "branch",
     enforcement: "active",
@@ -309,15 +318,15 @@ ruleset_json() {
         allowed_merge_methods: [$method]
       }}
     ] + (if ($checks | length) > 0 then [{type: "required_status_checks", parameters: {
-        strict_required_status_checks_policy: false,
+        strict_required_status_checks_policy: $strict,
         required_status_checks: $checks
       }}] else [] end))
   }'
 }
 
 upsert_ruleset() {
-  local repo=$1 name=$2 branch=$3 method=$4 bypass=$5 checks=$6 body existing_id
-  body=$(ruleset_json "$name" "$branch" "$method" "$bypass" "$checks")
+  local repo=$1 name=$2 branch=$3 method=$4 bypass=$5 checks=$6 strict=${7:-false} body existing_id
+  body=$(ruleset_json "$name" "$branch" "$method" "$bypass" "$checks" "$strict")
   existing_id=$(gh api "repos/$OWNER/$repo/rulesets?includes_parents=false" \
     --jq ".[] | select(.name == \"$name\") | .id" 2>/dev/null || true)
 
@@ -325,7 +334,7 @@ upsert_ruleset() {
   [[ -n $existing_id ]] && verb="atualizaria"
   checks_txt=$(jq -r 'map(.context) | if length > 0 then join(",") else "nenhum" end' <<<"$checks")
   if ! $APPLY; then
-    info "[dry-run] $verb ruleset \"$name\": só $method, checks=$checks_txt, bypass=$(jq -r 'map(.actor_type) | join(",")' <<<"$bypass")"
+    info "[dry-run] $verb ruleset \"$name\": só $method, checks=$checks_txt$($strict && echo " (branch atualizada obrigatória)"), bypass=$(jq -r 'map(.actor_type) | join(",")' <<<"$bypass")"
     return
   fi
   if [[ -n $existing_id ]]; then
@@ -335,6 +344,23 @@ upsert_ruleset() {
     gh api -X POST "repos/$OWNER/$repo/rulesets" --input - <<<"$body" >/dev/null || return 1
     info "→ ruleset \"$name\" criado"
   fi
+}
+
+# Se o workflow de migrations existe na `dev`, acrescenta o check aos de DEV_CHECKS e liga
+# MIGRATIONS_STRICT (branch atualizada antes do merge).
+DEV_CHECKS='[]'
+MIGRATIONS_STRICT=false
+add_migrations_check() {
+  local repo=$1
+  MIGRATIONS_STRICT=false
+  if ! gh api "repos/$OWNER/$repo/contents/$MIGRATIONS_WORKFLOW_PATH?ref=dev" >/dev/null 2>&1; then
+    info "check de migrations: $MIGRATIONS_WORKFLOW_PATH não está na dev — não exigido"
+    return
+  fi
+  MIGRATIONS_STRICT=true
+  info "check de migrations: obrigatório na dev, com branch atualizada antes do merge"
+  DEV_CHECKS=$(jq --arg c "$MIGRATIONS_CHECK_CONTEXT" \
+    'if any(.[]; .context == $c) then . else . + [{context: $c}] end' <<<"$DEV_CHECKS")
 }
 
 check_sync_workflow() {
@@ -372,10 +398,12 @@ process_repo() {
   check_branches "$repo"
   configure_merge_settings "$repo" "$meta"
   read_classic_protection "$repo" dev "$is_admin"
-  dev_checks=$CLASSIC_CHECKS
+  DEV_CHECKS=$CLASSIC_CHECKS
+  add_migrations_check "$repo"
+  dev_checks=$DEV_CHECKS
   read_classic_protection "$repo" main "$is_admin"
   main_checks=$CLASSIC_CHECKS
-  upsert_ruleset "$repo" "$RULESET_DEV_NAME" dev squash "$BYPASS_DEV" "$dev_checks" || {
+  upsert_ruleset "$repo" "$RULESET_DEV_NAME" dev squash "$BYPASS_DEV" "$dev_checks" "$MIGRATIONS_STRICT" || {
     warn "falhou ao gravar o ruleset da dev (o App está instalado neste repo?)"
     FAILED+=("$repo")
   }

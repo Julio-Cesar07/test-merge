@@ -130,8 +130,10 @@ revise, commite; `make migration-pr`.
 `make migration m="add stock" EMPTY=1` (vira 0002), escreva o `op.add_column`/`op.drop_column`,
 commite. Mergeie o PR do M1. Depois rode `make migration-pr` na `feat/stock`.
 - Esperado: `0002 → 0003 (pai: 0002)`; o arquivo é renomeado também na sua branch.
-- Variante: abra o PR da `feat/stock` **antes** de mergear o M1 e mergeie o M1 depois → o
-  `migrations check` do PR fica vermelho ("2 cabeças"); `make migration-pr` de novo resolve.
+- Variante: abra o PR da `feat/stock` **antes** de mergear o M1 e mergeie o M1 depois → o PR
+  da stock fica "out-of-date" e só mergeia depois do **Update branch** (precisa do script rodado
+  com o `migrations-check.yml` já na `dev`); o check roda de novo e fica vermelho ("revisão 0002
+  duplicada"); `make migration-pr` de novo resolve.
 
 **M3. Migration destrutiva.** Uma migration com `op.drop_column` no `upgrade()` →
 `make migration-pr` avisa e pergunta (`FORCE=1` pula).
